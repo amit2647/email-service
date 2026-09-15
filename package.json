@@ -1,7 +1,7 @@
 {
-    "name": "smtp-service",
+    "name": "email-service",
     "version": "1.0.0",
-    "description": "SMTP email service for customer management platform",
+    "description": "Email communication service for OmniCore Customer Platform",
     "main": "src/server.js",
     "scripts": {
         "start": "node src/server.js",
@@ -10,6 +10,8 @@
     "dependencies": {
         "dotenv": "^16.4.7",
         "express": "^5.1.0",
-        "nodemailer": "^7.0.3"
+        "jsonwebtoken": "^9.0.2",
+        "nodemailer": "^7.0.3",
+        "pg": "^8.16.3"
     }
 }
