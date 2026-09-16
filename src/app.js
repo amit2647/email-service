@@ -1,10 +1,12 @@
 const express = require("express");
-
+const cors = require("cors");
 const emailRoutes = require("./routes/emailRoutes");
 const emailAccountRoutes = require("./routes/emailAccountRoutes");
 const requestLogger = require("./middleware/requestLogger");
 
 const app = express();
+
+app.use(cors());
 
 app.use(
   express.json({
