@@ -10,13 +10,23 @@ function getAuthorizationToken(req) {
 
 async function sendEmail(req, res) {
   try {
-    const { to, subject, html, text, replyTo, leadId, customerId } = req.body;
+    const {
+      to,
+      subject,
+      html,
+      text,
+      replyTo,
+      leadId,
+      customerId,
+      emailAccountId,
+    } = req.body;
 
     const result = await emailService.sendEmail({
       organizationId: req.auth.organizationId,
       userId: req.auth.userId,
       leadId,
       customerId,
+      emailAccountId,
       to,
       subject,
       html,

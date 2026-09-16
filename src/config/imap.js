@@ -1,14 +1,28 @@
 const { ImapFlow } = require("imapflow");
 
-function createImapClient() {
+function createImapClient(emailAccount = {}) {
   return new ImapFlow({
-    host: process.env.IMAP_HOST || "imap.gmail.com",
-    port: Number(process.env.IMAP_PORT || 993),
-    secure: process.env.IMAP_SECURE !== "false",
+    host: emailAccount.imap_host || process.env.IMAP_HOST || "imap.gmail.com",
+
+    port: Number(emailAccount.imap_port || process.env.IMAP_PORT || 993),
+
+    secure:
+      emailAccount.imap_secure !== undefined
+        ? emailAccount.imap_secure
+        : process.env.IMAP_SECURE !== "false",
+
     auth: {
-      user: process.env.IMAP_USER || process.env.SMTP_USER,
-      pass: process.env.IMAP_PASSWORD || process.env.SMTP_PASSWORD,
+      user:
+        emailAccount.imap_username ||
+        process.env.IMAP_USER ||
+        process.env.SMTP_USER,
+
+      pass:
+        emailAccount.imap_password ||
+        process.env.IMAP_PASSWORD ||
+        process.env.SMTP_PASSWORD,
     },
+
     logger: false,
   });
 }
@@ -20,6 +34,7 @@ async function verifyIMAP() {
     await client.connect();
 
     const mailbox = process.env.IMAP_MAILBOX || "INBOX";
+
     const mailboxInfo = await client.mailboxOpen(mailbox);
 
     console.log(

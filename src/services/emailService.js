@@ -1,9 +1,11 @@
 const crypto = require("crypto");
+
 const { query } = require("../config/database");
-const { transporter } = require("../config/smtp");
+const { createSmtpTransporter } = require("../config/smtp");
 
 const LEAD_SERVICE_URL =
   process.env.LEAD_SERVICE_URL || "http://lead-service:4001";
+
 const CUSTOMER_SERVICE_URL =
   process.env.CUSTOMER_SERVICE_URL || "http://customer-service:4002";
 
@@ -236,8 +238,112 @@ async function validateContact({
   };
 }
 
+async function getEmailAccountById({ organizationId, emailAccountId }) {
+  const normalizedEmailAccountId = normalizeId(
+    emailAccountId,
+    "emailAccountId",
+  );
+
+  if (!normalizedEmailAccountId) {
+    throw createServiceError("Email account ID is required", 400);
+  }
+
+  const result = await query(
+    `
+      SELECT
+        id,
+        organization_id,
+        name,
+        email_address,
+        provider,
+        smtp_host,
+        smtp_port,
+        smtp_secure,
+        smtp_username,
+        smtp_password,
+        is_active
+      FROM email_accounts
+      WHERE
+        id = $1
+        AND organization_id = $2
+      LIMIT 1
+    `,
+    [normalizedEmailAccountId, organizationId],
+  );
+
+  if (result.rows.length === 0) {
+    throw createServiceError("Email account not found", 404);
+  }
+
+  const account = result.rows[0];
+
+  if (!account.is_active) {
+    throw createServiceError("Email account is inactive", 409);
+  }
+
+  return account;
+}
+
+async function getDefaultEmailAccount(organizationId) {
+  const result = await query(
+    `
+      SELECT
+        id,
+        organization_id,
+        name,
+        email_address,
+        provider,
+        smtp_host,
+        smtp_port,
+        smtp_secure,
+        smtp_username,
+        smtp_password,
+        is_active
+      FROM email_accounts
+      WHERE
+        organization_id = $1
+        AND is_active = TRUE
+      ORDER BY id ASC
+    `,
+    [organizationId],
+  );
+
+  if (result.rows.length === 0) {
+    throw createServiceError(
+      "No active email account is configured for this organization",
+      409,
+    );
+  }
+
+  if (result.rows.length > 1) {
+    throw createServiceError(
+      "Multiple active email accounts are configured. Specify emailAccountId.",
+      400,
+    );
+  }
+
+  return result.rows[0];
+}
+
+async function resolveEmailAccount({ organizationId, emailAccountId }) {
+  const normalizedEmailAccountId = normalizeId(
+    emailAccountId,
+    "emailAccountId",
+  );
+
+  if (normalizedEmailAccountId) {
+    return getEmailAccountById({
+      organizationId,
+      emailAccountId: normalizedEmailAccountId,
+    });
+  }
+
+  return getDefaultEmailAccount(organizationId);
+}
+
 async function createEmailConversation({
   organizationId,
+  emailAccountId,
   leadId,
   customerId,
   subject,
@@ -246,18 +352,52 @@ async function createEmailConversation({
     `
       INSERT INTO email_conversations (
         organization_id,
+        email_account_id,
         lead_id,
         customer_id,
         subject,
         status
       )
-      VALUES ($1, $2, $3, $4, 'open')
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        'open'
+      )
       RETURNING *
     `,
-    [organizationId, leadId || null, customerId || null, subject],
+    [
+      organizationId,
+      emailAccountId,
+      leadId || null,
+      customerId || null,
+      subject,
+    ],
   );
 
   return result.rows[0];
+}
+
+async function assignEmailAccountToConversation({
+  organizationId,
+  conversationId,
+  emailAccountId,
+}) {
+  await query(
+    `
+      UPDATE email_conversations
+      SET
+        email_account_id = $1,
+        updated_at = NOW()
+      WHERE
+        id = $2
+        AND organization_id = $3
+        AND email_account_id IS NULL
+    `,
+    [emailAccountId, conversationId, organizationId],
+  );
 }
 
 async function getEmailConversationById({ organizationId, conversationId }) {
@@ -268,10 +408,18 @@ async function getEmailConversationById({ organizationId, conversationId }) {
 
   const result = await query(
     `
-      SELECT *
-      FROM email_conversations
-      WHERE id = $1
-        AND organization_id = $2
+      SELECT
+        ec.*,
+        ea.name AS email_account_name,
+        ea.email_address AS email_account_address,
+        ea.provider AS email_account_provider,
+        ea.is_active AS email_account_active
+      FROM email_conversations ec
+      LEFT JOIN email_accounts ea
+        ON ea.id = ec.email_account_id
+      WHERE
+        ec.id = $1
+        AND ec.organization_id = $2
     `,
     [normalizedConversationId, organizationId],
   );
@@ -286,13 +434,17 @@ async function getEmailConversationById({ organizationId, conversationId }) {
 async function getLatestEmailDelivery(conversationId) {
   const result = await query(
     `
-      SELECT ed.*
+      SELECT
+        ed.*
       FROM email_deliveries ed
       INNER JOIN communications c
         ON c.id = ed.communication_id
-      WHERE c.conversation_id = $1
+      WHERE
+        c.conversation_id = $1
         AND ed.message_id IS NOT NULL
-      ORDER BY c.created_at DESC, ed.id DESC
+      ORDER BY
+        c.created_at DESC,
+        ed.id DESC
       LIMIT 1
     `,
     [conversationId],
@@ -301,11 +453,14 @@ async function getLatestEmailDelivery(conversationId) {
   return result.rows[0] || null;
 }
 
-function generateMessageId(communicationId) {
+function generateMessageId(communicationId, sender) {
+  const senderDomain =
+    typeof sender === "string" && sender.includes("@")
+      ? sender.split("@")[1]
+      : null;
+
   const domain =
-    process.env.EMAIL_MESSAGE_ID_DOMAIN ||
-    process.env.SMTP_FROM?.split("@")[1] ||
-    "omnicore.local";
+    process.env.EMAIL_MESSAGE_ID_DOMAIN || senderDomain || "omnicore.local";
 
   return `<omnicore-${communicationId}-${crypto.randomUUID()}@${domain}>`;
 }
@@ -473,6 +628,7 @@ async function sendOutboundEmail({
   leadId,
   customerId,
   conversation,
+  emailAccount,
   to,
   subject,
   html,
@@ -482,18 +638,40 @@ async function sendOutboundEmail({
   inReplyTo = null,
   referencesHeader = null,
 }) {
+  if (Number(conversation.organization_id) !== Number(organizationId)) {
+    throw createServiceError(
+      "Email conversation does not belong to the authenticated organization",
+      403,
+    );
+  }
+
+  if (Number(conversation.email_account_id) !== Number(emailAccount.id)) {
+    throw createServiceError(
+      "Email account does not belong to the email conversation",
+      409,
+    );
+  }
+
   const communication = await createCommunication({
     organizationId,
-    leadId: leadId || conversation?.lead_id || null,
-    customerId: customerId || conversation?.customer_id || null,
+    leadId: leadId || conversation.lead_id || null,
+    customerId: customerId || conversation.customer_id || null,
     conversationId: conversation.id,
     subject,
     body: html || text,
     createdBy: userId,
   });
 
-  const messageId = generateMessageId(communication.id);
-  const sender = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const sender = emailAccount.email_address || emailAccount.smtp_username;
+
+  if (!sender) {
+    throw createServiceError(
+      "Email account sender address is not configured",
+      409,
+    );
+  }
+
+  const messageId = generateMessageId(communication.id, sender);
 
   const delivery = await createEmailDelivery({
     communicationId: communication.id,
@@ -520,14 +698,22 @@ async function sendOutboundEmail({
       ...(referencesHeader ? { references: referencesHeader } : {}),
     };
 
-    console.log(`[Email] Sending email to ${to}`);
-    console.log(`[Email] Message-ID: ${messageId}`);
+    console.log(`[Email][Account ${emailAccount.id}] Sending email to ${to}`);
+
+    console.log(`[Email][Account ${emailAccount.id}] From: ${sender}`);
+
+    console.log(`[Email][Account ${emailAccount.id}] Message-ID: ${messageId}`);
 
     if (inReplyTo) {
-      console.log(`[Email] In-Reply-To: ${inReplyTo}`);
+      console.log(
+        `[Email][Account ${emailAccount.id}] In-Reply-To: ${inReplyTo}`,
+      );
     }
 
-    const result = await transporter.sendMail(mail);
+    const accountTransporter = createSmtpTransporter(emailAccount);
+
+    const result = await accountTransporter.sendMail(mail);
+
     const finalMessageId = result.messageId || messageId;
 
     const updatedDelivery = await updateEmailDelivery({
@@ -543,12 +729,17 @@ async function sendOutboundEmail({
 
     await updateConversationTimestamp(conversation.id, subject);
 
-    console.log(`[Email] Email sent successfully: ${finalMessageId}`);
+    console.log(
+      `[Email][Account ${emailAccount.id}] Email sent successfully: ${finalMessageId}`,
+    );
 
     return {
       conversation: {
         id: conversation.id,
         organizationId: conversation.organization_id,
+        emailAccountId: conversation.email_account_id,
+        emailAccountName: emailAccount.name,
+        emailAccountAddress: emailAccount.email_address,
         leadId: conversation.lead_id,
         customerId: conversation.customer_id,
         subject,
@@ -561,7 +752,10 @@ async function sendOutboundEmail({
       rejected: result.rejected,
     };
   } catch (error) {
-    console.error("[Email] Email delivery failed:", error);
+    console.error(
+      `[Email][Account ${emailAccount.id}] Email delivery failed:`,
+      error,
+    );
 
     try {
       await updateEmailDelivery({
@@ -594,6 +788,7 @@ async function sendEmail({
   userId,
   leadId,
   customerId,
+  emailAccountId,
   to,
   subject,
   html,
@@ -606,10 +801,22 @@ async function sendEmail({
   }
 
   const normalizedLeadId = normalizeId(leadId, "leadId");
+
   const normalizedCustomerId = normalizeId(customerId, "customerId");
+
+  const normalizedEmailAccountId = normalizeId(
+    emailAccountId,
+    "emailAccountId",
+  );
+
   const recipient = validateEmailAddress(to);
+
   const normalizedSubject = validateSubject(subject);
-  const content = validateContent({ html, text });
+
+  const content = validateContent({
+    html,
+    text,
+  });
 
   await validateContact({
     organizationId,
@@ -618,8 +825,14 @@ async function sendEmail({
     authorizationToken,
   });
 
+  const emailAccount = await resolveEmailAccount({
+    organizationId,
+    emailAccountId: normalizedEmailAccountId,
+  });
+
   const conversation = await createEmailConversation({
     organizationId,
+    emailAccountId: emailAccount.id,
     leadId: normalizedLeadId,
     customerId: normalizedCustomerId,
     subject: normalizedSubject,
@@ -631,6 +844,7 @@ async function sendEmail({
     leadId: normalizedLeadId,
     customerId: normalizedCustomerId,
     conversation,
+    emailAccount,
     to: recipient,
     subject: normalizedSubject,
     html: content.html,
@@ -667,11 +881,40 @@ async function replyToConversation({
     );
   }
 
+  let emailAccount;
+
+  if (conversation.email_account_id) {
+    emailAccount = await getEmailAccountById({
+      organizationId,
+      emailAccountId: conversation.email_account_id,
+    });
+  } else {
+    emailAccount = await getDefaultEmailAccount(organizationId);
+
+    await assignEmailAccountToConversation({
+      organizationId,
+      conversationId: conversation.id,
+      emailAccountId: emailAccount.id,
+    });
+
+    conversation.email_account_id = emailAccount.id;
+
+    console.log(
+      `[Email] Assigned email account ${emailAccount.id} to legacy conversation ${conversation.id}`,
+    );
+  }
+
   const recipient = validateEmailAddress(to);
+
   const normalizedSubject = validateSubject(subject || conversation.subject);
-  const content = validateContent({ html, text });
+
+  const content = validateContent({
+    html,
+    text,
+  });
 
   const previousDelivery = await getLatestEmailDelivery(conversation.id);
+
   const previousMessageId = previousDelivery?.message_id || null;
 
   let referencesHeader = null;
@@ -690,6 +933,7 @@ async function replyToConversation({
     leadId: conversation.lead_id,
     customerId: conversation.customer_id,
     conversation,
+    emailAccount,
     to: recipient,
     subject: normalizedSubject,
     html: content.html,
@@ -713,6 +957,9 @@ async function getCommunicationById({ organizationId, communicationId }) {
         c.*,
         ec.status AS conversation_status,
         ec.subject AS conversation_subject,
+        ec.email_account_id,
+        ea.name AS email_account_name,
+        ea.email_address AS email_account_address,
         ed.id AS delivery_id,
         ed.message_id,
         ed.provider,
@@ -733,9 +980,12 @@ async function getCommunicationById({ organizationId, communicationId }) {
       FROM communications c
       LEFT JOIN email_conversations ec
         ON ec.id = c.conversation_id
+      LEFT JOIN email_accounts ea
+        ON ea.id = ec.email_account_id
       LEFT JOIN email_deliveries ed
         ON ed.communication_id = c.id
-      WHERE c.id = $1
+      WHERE
+        c.id = $1
         AND c.organization_id = $2
       ORDER BY ed.id ASC
       LIMIT 1
@@ -768,6 +1018,9 @@ async function getCommunicationById({ organizationId, communicationId }) {
           id: row.conversation_id,
           status: row.conversation_status,
           subject: row.conversation_subject,
+          emailAccountId: row.email_account_id,
+          emailAccountName: row.email_account_name,
+          emailAccountAddress: row.email_account_address,
         }
       : null,
     delivery: row.delivery_id
@@ -802,7 +1055,9 @@ async function getCommunications({
   limit = 50,
 }) {
   const normalizedLeadId = normalizeId(leadId, "leadId");
+
   const normalizedCustomerId = normalizeId(customerId, "customerId");
+
   const normalizedConversationId = normalizeId(
     conversationId,
     "conversationId",
@@ -816,20 +1071,24 @@ async function getCommunications({
   }
 
   const values = [organizationId];
+
   const conditions = ["c.organization_id = $1"];
 
   if (normalizedLeadId) {
     values.push(normalizedLeadId);
+
     conditions.push(`c.lead_id = $${values.length}`);
   }
 
   if (normalizedCustomerId) {
     values.push(normalizedCustomerId);
+
     conditions.push(`c.customer_id = $${values.length}`);
   }
 
   if (normalizedConversationId) {
     values.push(normalizedConversationId);
+
     conditions.push(`c.conversation_id = $${values.length}`);
   }
 
@@ -843,6 +1102,9 @@ async function getCommunications({
     `
       SELECT
         c.*,
+        ec.email_account_id,
+        ea.name AS email_account_name,
+        ea.email_address AS email_account_address,
         ed.id AS delivery_id,
         ed.message_id,
         ed.provider,
@@ -859,6 +1121,10 @@ async function getCommunications({
         ed.delivered_at,
         ed.received_at
       FROM communications c
+      LEFT JOIN email_conversations ec
+        ON ec.id = c.conversation_id
+      LEFT JOIN email_accounts ea
+        ON ea.id = ec.email_account_id
       LEFT JOIN email_deliveries ed
         ON ed.communication_id = c.id
       WHERE ${conditions.join(" AND ")}
@@ -882,6 +1148,14 @@ async function getCommunications({
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    conversation: row.conversation_id
+      ? {
+          id: row.conversation_id,
+          emailAccountId: row.email_account_id,
+          emailAccountName: row.email_account_name,
+          emailAccountAddress: row.email_account_address,
+        }
+      : null,
     delivery: row.delivery_id
       ? {
           id: row.delivery_id,

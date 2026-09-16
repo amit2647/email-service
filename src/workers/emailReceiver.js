@@ -6,41 +6,35 @@ const {
   createReceiverState,
   updateReceiverState,
 } = require("../services/emailReceiverStateService");
+const { getActiveEmailAccounts } = require("../services/emailAccountService");
 
 function getAddress(addressObject) {
   if (!addressObject) {
     return null;
   }
-
   if (typeof addressObject.text === "string") {
     return addressObject.text;
   }
-
   if (Array.isArray(addressObject.value) && addressObject.value.length > 0) {
     return addressObject.value
       .map((entry) => entry.address || entry.name)
       .filter(Boolean)
       .join(", ");
   }
-
   return null;
 }
 
 function getHeader(parsed, name) {
   const value = parsed.headers.get(name);
-
   if (!value) {
     return null;
   }
-
   if (typeof value === "string") {
     return value;
   }
-
   if (Array.isArray(value)) {
     return value.join(" ");
   }
-
   return String(value);
 }
 
@@ -48,7 +42,6 @@ function normalizeReferences(references) {
   if (!references) {
     return null;
   }
-
   if (Array.isArray(references)) {
     return references
       .filter(Boolean)
@@ -56,16 +49,17 @@ function normalizeReferences(references) {
       .filter(Boolean)
       .join(" ");
   }
-
   if (typeof references === "string") {
     return references.trim() || null;
   }
-
   return String(references).trim() || null;
 }
 
-async function processMessage(client, uid) {
-  console.log(`[IMAP] Fetching UID ${uid}`);
+async function processMessage(client, uid, emailAccount) {
+  const emailAccountId = emailAccount.id;
+  const organizationId = emailAccount.organization_id;
+
+  console.log(`[IMAP][Account ${emailAccountId}] Fetching UID ${uid}`);
 
   const message = await client.fetchOne(
     uid,
@@ -80,40 +74,42 @@ async function processMessage(client, uid) {
   );
 
   if (!message?.source) {
-    console.warn(`[IMAP] Unable to read message UID ${uid}`);
+    console.warn(
+      `[IMAP][Account ${emailAccountId}] Unable to read message UID ${uid}`,
+    );
     return null;
   }
 
   const parsed = await simpleParser(message.source);
 
   const messageId = parsed.messageId || getHeader(parsed, "message-id");
-
   const inReplyTo = parsed.inReplyTo || getHeader(parsed, "in-reply-to");
-
   const references = normalizeReferences(
     parsed.references || getHeader(parsed, "references"),
   );
-
   const fromAddress = getAddress(parsed.from);
   const toAddress = getAddress(parsed.to);
   const ccAddress = getAddress(parsed.cc);
   const replyTo = getAddress(parsed.replyTo);
-
   const subject = parsed.subject || null;
   const body = parsed.text || parsed.html || "";
-
   const receivedAt = message.internalDate || parsed.date || new Date();
 
-  console.log("[IMAP] New email received");
-  console.log(`[IMAP] UID: ${uid}`);
-  console.log(`[IMAP] From: ${fromAddress}`);
-  console.log(`[IMAP] To: ${toAddress}`);
-  console.log(`[IMAP] Subject: ${subject}`);
-  console.log(`[IMAP] Message-ID: ${messageId}`);
-  console.log(`[IMAP] In-Reply-To: ${inReplyTo}`);
-  console.log(`[IMAP] References: ${references}`);
+  console.log(`[IMAP][Account ${emailAccountId}] New email received`);
+  console.log(
+    `[IMAP][Account ${emailAccountId}] Organization: ${organizationId}`,
+  );
+  console.log(`[IMAP][Account ${emailAccountId}] UID: ${uid}`);
+  console.log(`[IMAP][Account ${emailAccountId}] From: ${fromAddress}`);
+  console.log(`[IMAP][Account ${emailAccountId}] To: ${toAddress}`);
+  console.log(`[IMAP][Account ${emailAccountId}] Subject: ${subject}`);
+  console.log(`[IMAP][Account ${emailAccountId}] Message-ID: ${messageId}`);
+  console.log(`[IMAP][Account ${emailAccountId}] In-Reply-To: ${inReplyTo}`);
+  console.log(`[IMAP][Account ${emailAccountId}] References: ${references}`);
 
   const result = await processInboundEmail({
+    organizationId,
+    emailAccountId,
     messageId,
     inReplyTo,
     referencesHeader: references,
@@ -126,7 +122,7 @@ async function processMessage(client, uid) {
     receivedAt,
   });
 
-  console.log("[IMAP] Processing result:", result);
+  console.log(`[IMAP][Account ${emailAccountId}] Processing result:`, result);
 
   return result;
 }
@@ -151,15 +147,18 @@ async function getHighestUid(client) {
 async function processNewMessages(
   client,
   mailbox,
-  organizationId,
+  emailAccount,
   lastProcessedUid,
 ) {
+  const emailAccountId = emailAccount.id;
   const lock = await client.getMailboxLock(mailbox);
 
   try {
     const minimumUid = Number(lastProcessedUid) + 1;
 
-    console.log(`[IMAP] Searching for UIDs >= ${minimumUid}`);
+    console.log(
+      `[IMAP][Account ${emailAccountId}] Searching for UIDs >= ${minimumUid}`,
+    );
 
     const searchResult = await client.search(
       {
@@ -171,8 +170,7 @@ async function processNewMessages(
     );
 
     if (!searchResult || searchResult.length === 0) {
-      console.log("[IMAP] No new UIDs found");
-
+      console.log(`[IMAP][Account ${emailAccountId}] No new UIDs found`);
       return lastProcessedUid;
     }
 
@@ -181,41 +179,45 @@ async function processNewMessages(
       .sort((a, b) => a - b);
 
     console.log(
-      `[IMAP] Found ${newUids.length} new UID(s): ${newUids.join(", ")}`,
+      `[IMAP][Account ${emailAccountId}] Found ${newUids.length} new UID(s): ${newUids.join(", ")}`,
     );
 
     let highestSuccessfullyProcessedUid = Number(lastProcessedUid);
 
     for (const uid of newUids) {
       try {
-        const result = await processMessage(client, uid);
+        const result = await processMessage(client, uid, emailAccount);
 
         if (result?.matched || result?.duplicate) {
           await client.messageFlagsAdd(uid, ["\\Seen"], {
             uid: true,
           });
 
-          console.log(`[IMAP] UID ${uid} marked as Seen`);
+          console.log(
+            `[IMAP][Account ${emailAccountId}] UID ${uid} marked as Seen`,
+          );
         } else {
           console.log(
-            `[IMAP] UID ${uid} was not matched to an OmniCore conversation; leaving unread`,
+            `[IMAP][Account ${emailAccountId}] UID ${uid} was not matched; leaving unread`,
           );
         }
 
         highestSuccessfullyProcessedUid = uid;
 
         await updateReceiverState(
-          organizationId,
+          emailAccountId,
           mailbox,
           highestSuccessfullyProcessedUid,
         );
 
         console.log(
-          `[IMAP] Persisted checkpoint: UID ${highestSuccessfullyProcessedUid}`,
+          `[IMAP][Account ${emailAccountId}] Persisted checkpoint: UID ${highestSuccessfullyProcessedUid}`,
         );
       } catch (error) {
-        console.error(`[IMAP] Failed to process UID ${uid}:`, error);
-
+        console.error(
+          `[IMAP][Account ${emailAccountId}] Failed to process UID ${uid}:`,
+          error,
+        );
         break;
       }
     }
@@ -226,48 +228,61 @@ async function processNewMessages(
   }
 }
 
-async function startEmailReceiver() {
-  const client = createImapClient();
-
-  const mailbox = process.env.IMAP_MAILBOX || "INBOX";
-
-  const organizationId = Number(process.env.EMAIL_ORGANIZATION_ID || 1);
+async function startAccountReceiver(emailAccount) {
+  const emailAccountId = emailAccount.id;
+  const mailbox = emailAccount.imap_mailbox || "INBOX";
+  const client = createImapClient(emailAccount);
 
   let lastProcessedUid = 0;
   let processingMailbox = false;
   let mailboxChangePending = false;
 
   client.on("error", (error) => {
-    console.error("[IMAP] Client error:", error);
+    console.error(`[IMAP][Account ${emailAccountId}] Client error:`, error);
   });
 
   client.on("close", () => {
-    console.warn("[IMAP] Connection closed");
+    console.warn(`[IMAP][Account ${emailAccountId}] Connection closed`);
+  });
+
+  client.on("exists", (data) => {
+    console.log(
+      `[IMAP][Account ${emailAccountId}] EXISTS event received:`,
+      data,
+    );
+
+    mailboxChangePending = true;
+
+    processMailbox().catch((error) => {
+      console.error(
+        `[IMAP][Account ${emailAccountId}] Event mailbox processing failed:`,
+        error,
+      );
+    });
   });
 
   await client.connect();
-
   await client.mailboxOpen(mailbox);
 
-  console.log(`[IMAP] Watching mailbox: ${mailbox}`);
+  console.log(`[IMAP][Account ${emailAccountId}] Watching mailbox: ${mailbox}`);
 
-  let receiverState = await getReceiverState(organizationId, mailbox);
+  let receiverState = await getReceiverState(emailAccountId, mailbox);
 
   if (!receiverState) {
     const currentHighestUid = await getHighestUid(client);
 
     receiverState = await createReceiverState(
-      organizationId,
+      emailAccountId,
       mailbox,
       currentHighestUid,
     );
 
     console.log(
-      `[IMAP] Created receiver state with initial UID ${currentHighestUid}`,
+      `[IMAP][Account ${emailAccountId}] Created receiver state with initial UID ${currentHighestUid}`,
     );
   } else {
     console.log(
-      `[IMAP] Loaded receiver state: UID ${receiverState.last_processed_uid}`,
+      `[IMAP][Account ${emailAccountId}] Loaded receiver state: UID ${receiverState.last_processed_uid}`,
     );
   }
 
@@ -278,7 +293,7 @@ async function startEmailReceiver() {
       mailboxChangePending = true;
 
       console.log(
-        "[IMAP] Mailbox processing already running; change marked pending",
+        `[IMAP][Account ${emailAccountId}] Mailbox processing already running; change marked pending`,
       );
 
       return;
@@ -292,12 +307,14 @@ async function startEmailReceiver() {
 
         const previousUid = lastProcessedUid;
 
-        console.log(`[IMAP] Checking for messages after UID ${previousUid}`);
+        console.log(
+          `[IMAP][Account ${emailAccountId}] Checking for messages after UID ${previousUid}`,
+        );
 
         const newLastProcessedUid = await processNewMessages(
           client,
           mailbox,
-          organizationId,
+          emailAccount,
           previousUid,
         );
 
@@ -305,10 +322,15 @@ async function startEmailReceiver() {
           lastProcessedUid = newLastProcessedUid;
         }
 
-        console.log(`[IMAP] UID state: lastProcessedUid=${lastProcessedUid}`);
+        console.log(
+          `[IMAP][Account ${emailAccountId}] UID state: lastProcessedUid=${lastProcessedUid}`,
+        );
       } while (mailboxChangePending);
     } catch (error) {
-      console.error("[IMAP] Mailbox processing failed:", error);
+      console.error(
+        `[IMAP][Account ${emailAccountId}] Mailbox processing failed:`,
+        error,
+      );
     } finally {
       processingMailbox = false;
     }
@@ -316,39 +338,50 @@ async function startEmailReceiver() {
 
   await processMailbox();
 
-  console.log("[IMAP] Initial mailbox processing completed");
+  console.log(
+    `[IMAP][Account ${emailAccountId}] Initial mailbox processing completed`,
+  );
 
-  async function watchMailbox() {
-    while (true) {
-      try {
-        if (!client.usable) {
-          console.warn("[IMAP] IMAP connection is not usable");
-
-          return;
-        }
-
-        console.log("[IMAP] Entering IDLE");
-
-        await client.idle();
-
-        console.log("[IMAP] IDLE ended; checking mailbox");
-
-        await processMailbox();
-      } catch (error) {
-        console.error("[IMAP] IDLE/watch error:", error);
-
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
-    }
-  }
-
-  watchMailbox().catch((error) => {
-    console.error("[IMAP] Mailbox watcher stopped:", error);
-  });
+  console.log(`[IMAP][Account ${emailAccountId}] Entering IDLE`);
 
   return client;
 }
 
+async function startEmailReceiver() {
+  const emailAccounts = await getActiveEmailAccounts();
+
+  if (!emailAccounts || emailAccounts.length === 0) {
+    console.log("[IMAP] No active email accounts configured");
+    return [];
+  }
+
+  console.log(
+    `[IMAP] Starting ${emailAccounts.length} active email account(s)`,
+  );
+
+  const receivers = [];
+
+  for (const emailAccount of emailAccounts) {
+    try {
+      const receiver = await startAccountReceiver(emailAccount);
+
+      receivers.push(receiver);
+
+      console.log(
+        `[IMAP] Email account ${emailAccount.id} started successfully`,
+      );
+    } catch (error) {
+      console.error(
+        `[IMAP] Failed to start email account ${emailAccount.id}:`,
+        error,
+      );
+    }
+  }
+
+  return receivers;
+}
+
 module.exports = {
   startEmailReceiver,
+  startAccountReceiver,
 };

@@ -1,6 +1,7 @@
 const express = require("express");
 
 const emailRoutes = require("./routes/emailRoutes");
+const emailAccountRoutes = require("./routes/emailAccountRoutes");
 const requestLogger = require("./middleware/requestLogger");
 
 const app = express();
@@ -22,6 +23,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/emails", emailRoutes);
+app.use("/emails/accounts", emailAccountRoutes);
 
 app.use((req, res) => {
   res.status(404).json({

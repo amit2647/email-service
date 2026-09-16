@@ -5,7 +5,6 @@ const app = require("./app");
 const { testDatabaseConnection } = require("./config/database");
 const { initializeDatabase } = require("./db/initialize");
 const { verifySMTP } = require("./config/smtp");
-const { verifyIMAP } = require("./config/imap");
 const { startEmailReceiver } = require("./workers/emailReceiver");
 
 const PORT = Number(process.env.PORT || 4006);
@@ -18,14 +17,15 @@ async function startServer() {
 
     await verifySMTP();
 
-    await verifyIMAP();
-
     app.listen(PORT, async () => {
       console.log(`Email Service running on port ${PORT}`);
 
       try {
-        await startEmailReceiver();
-        console.log("[Email Service] Inbound email receiver started");
+        const receivers = await startEmailReceiver();
+
+        console.log(
+          `[Email Service] Inbound email receiver started for ${receivers.length} active account(s)`,
+        );
       } catch (error) {
         console.error(
           "[Email Service] Failed to start inbound email receiver:",

@@ -24,7 +24,11 @@ function parseReferences(referencesHeader) {
   return referencesHeader.split(/\s+/).map(normalizeMessageId).filter(Boolean);
 }
 
-async function findConversationByMessageId(messageId) {
+async function findConversationByMessageId(
+  organizationId,
+  emailAccountId,
+  messageId,
+) {
   if (!messageId) {
     return null;
   }
@@ -32,28 +36,39 @@ async function findConversationByMessageId(messageId) {
   const result = await query(
     `
       SELECT
-        c.conversation_id,
+        ec.id AS conversation_id,
         c.id AS communication_id,
         c.organization_id,
+        ec.email_account_id,
         c.lead_id,
         c.customer_id,
-        c.subject,
+        ec.subject,
         ed.message_id,
         ed.references_header
       FROM email_deliveries ed
       INNER JOIN communications c
         ON c.id = ed.communication_id
-      WHERE ed.message_id = $1
+      INNER JOIN email_conversations ec
+        ON ec.id = c.conversation_id
+      WHERE
+        ed.message_id = $1
+        AND c.organization_id = $2
+        AND ec.organization_id = $2
+        AND ec.email_account_id = $3
       ORDER BY ed.id DESC
       LIMIT 1
     `,
-    [messageId],
+    [messageId, organizationId, emailAccountId],
   );
 
   return result.rows[0] || null;
 }
 
-async function findConversationByReference(messageId) {
+async function findConversationByReference(
+  organizationId,
+  emailAccountId,
+  messageId,
+) {
   if (!messageId) {
     return null;
   }
@@ -61,30 +76,40 @@ async function findConversationByReference(messageId) {
   const result = await query(
     `
       SELECT
-        c.conversation_id,
+        ec.id AS conversation_id,
         c.id AS communication_id,
         c.organization_id,
+        ec.email_account_id,
         c.lead_id,
         c.customer_id,
-        c.subject,
+        ec.subject,
         ed.message_id,
         ed.references_header
       FROM email_deliveries ed
       INNER JOIN communications c
         ON c.id = ed.communication_id
+      INNER JOIN email_conversations ec
+        ON ec.id = c.conversation_id
       WHERE
         ed.references_header IS NOT NULL
         AND ed.references_header LIKE $1
+        AND c.organization_id = $2
+        AND ec.organization_id = $2
+        AND ec.email_account_id = $3
       ORDER BY ed.id DESC
       LIMIT 1
     `,
-    [`%${messageId}%`],
+    [`%${messageId}%`, organizationId, emailAccountId],
   );
 
   return result.rows[0] || null;
 }
 
-async function findCommunicationByMessageId(messageId) {
+async function findCommunicationByMessageId(
+  organizationId,
+  emailAccountId,
+  messageId,
+) {
   if (!messageId) {
     return null;
   }
@@ -94,14 +119,21 @@ async function findCommunicationByMessageId(messageId) {
       SELECT
         c.id,
         c.conversation_id,
-        c.organization_id
+        c.organization_id,
+        ec.email_account_id
       FROM communications c
       INNER JOIN email_deliveries ed
         ON ed.communication_id = c.id
-      WHERE ed.message_id = $1
+      INNER JOIN email_conversations ec
+        ON ec.id = c.conversation_id
+      WHERE
+        ed.message_id = $1
+        AND c.organization_id = $2
+        AND ec.organization_id = $2
+        AND ec.email_account_id = $3
       LIMIT 1
     `,
-    [messageId],
+    [messageId, organizationId, emailAccountId],
   );
 
   return result.rows[0] || null;
@@ -187,22 +219,21 @@ async function createInboundDelivery({
         $1,
         $2,
         'imap',
+        NULL,
         $3,
         $4,
         $5,
         $6,
         $7,
         $8,
-        $9,
         'delivered',
-        $10
+        $9
       )
       RETURNING *
     `,
     [
       communicationId,
       messageId,
-      toAddress || fromAddress || "unknown",
       fromAddress || null,
       toAddress || null,
       ccAddress || null,
@@ -216,20 +247,30 @@ async function createInboundDelivery({
   return result.rows[0];
 }
 
-async function updateConversation(conversationId, subject) {
+async function updateConversation(
+  organizationId,
+  emailAccountId,
+  conversationId,
+  subject,
+) {
   await query(
     `
       UPDATE email_conversations
       SET
         updated_at = NOW(),
         subject = COALESCE($1, subject)
-      WHERE id = $2
+      WHERE
+        id = $2
+        AND organization_id = $3
+        AND email_account_id = $4
     `,
-    [subject || null, conversationId],
+    [subject || null, conversationId, organizationId, emailAccountId],
   );
 }
 
 async function processInboundEmail({
+  organizationId,
+  emailAccountId,
   messageId,
   inReplyTo,
   referencesHeader,
@@ -241,12 +282,26 @@ async function processInboundEmail({
   body,
   receivedAt,
 }) {
+  if (
+    !Number.isInteger(Number(organizationId)) ||
+    Number(organizationId) <= 0
+  ) {
+    throw new Error("Invalid organizationId");
+  }
+
+  if (
+    !Number.isInteger(Number(emailAccountId)) ||
+    Number(emailAccountId) <= 0
+  ) {
+    throw new Error("Invalid emailAccountId");
+  }
+
+  const normalizedOrganizationId = Number(organizationId);
+  const normalizedEmailAccountId = Number(emailAccountId);
+
   const normalizedMessageId = normalizeMessageId(messageId);
-
   const normalizedInReplyTo = normalizeMessageId(inReplyTo);
-
   const normalizedFromAddress = normalizeEmail(fromAddress);
-
   const normalizedToAddress = normalizeEmail(toAddress);
 
   if (!normalizedMessageId) {
@@ -254,8 +309,11 @@ async function processInboundEmail({
   }
 
   if (normalizedMessageId) {
-    const existingCommunication =
-      await findCommunicationByMessageId(normalizedMessageId);
+    const existingCommunication = await findCommunicationByMessageId(
+      normalizedOrganizationId,
+      normalizedEmailAccountId,
+      normalizedMessageId,
+    );
 
     if (existingCommunication) {
       console.log(
@@ -276,8 +334,11 @@ async function processInboundEmail({
   if (normalizedInReplyTo) {
     console.log(`[Inbound Email] Matching In-Reply-To: ${normalizedInReplyTo}`);
 
-    matchedConversation =
-      await findConversationByMessageId(normalizedInReplyTo);
+    matchedConversation = await findConversationByMessageId(
+      normalizedOrganizationId,
+      normalizedEmailAccountId,
+      normalizedInReplyTo,
+    );
   }
 
   if (!matchedConversation && normalizedInReplyTo) {
@@ -285,8 +346,11 @@ async function processInboundEmail({
       `[Inbound Email] Trying References lookup for: ${normalizedInReplyTo}`,
     );
 
-    matchedConversation =
-      await findConversationByReference(normalizedInReplyTo);
+    matchedConversation = await findConversationByReference(
+      normalizedOrganizationId,
+      normalizedEmailAccountId,
+      normalizedInReplyTo,
+    );
   }
 
   if (!matchedConversation && referencesHeader) {
@@ -295,7 +359,11 @@ async function processInboundEmail({
     console.log(`[Inbound Email] Searching ${references.length} References`);
 
     for (const reference of references.reverse()) {
-      matchedConversation = await findConversationByMessageId(reference);
+      matchedConversation = await findConversationByMessageId(
+        normalizedOrganizationId,
+        normalizedEmailAccountId,
+        reference,
+      );
 
       if (matchedConversation) {
         console.log(
@@ -323,8 +391,36 @@ async function processInboundEmail({
     };
   }
 
+  if (
+    Number(matchedConversation.organization_id) !== normalizedOrganizationId
+  ) {
+    console.warn(
+      `[Inbound Email] Organization mismatch for conversation ${matchedConversation.conversation_id}`,
+    );
+
+    return {
+      matched: false,
+      duplicate: false,
+      messageId: normalizedMessageId,
+    };
+  }
+
+  if (
+    Number(matchedConversation.email_account_id) !== normalizedEmailAccountId
+  ) {
+    console.warn(
+      `[Inbound Email] Email account mismatch for conversation ${matchedConversation.conversation_id}`,
+    );
+
+    return {
+      matched: false,
+      duplicate: false,
+      messageId: normalizedMessageId,
+    };
+  }
+
   const communication = await createInboundCommunication({
-    organizationId: matchedConversation.organization_id,
+    organizationId: normalizedOrganizationId,
     conversationId: matchedConversation.conversation_id,
     leadId: matchedConversation.lead_id,
     customerId: matchedConversation.customer_id,
@@ -344,10 +440,15 @@ async function processInboundEmail({
     receivedAt,
   });
 
-  await updateConversation(matchedConversation.conversation_id, subject);
+  await updateConversation(
+    normalizedOrganizationId,
+    normalizedEmailAccountId,
+    matchedConversation.conversation_id,
+    subject,
+  );
 
   console.log(
-    `[Inbound Email] Stored reply: communication=${communication.id}, conversation=${matchedConversation.conversation_id}`,
+    `[Inbound Email] Stored reply: communication=${communication.id}, conversation=${matchedConversation.conversation_id}, account=${normalizedEmailAccountId}`,
   );
 
   return {
