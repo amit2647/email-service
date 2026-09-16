@@ -1,5 +1,4 @@
 const express = require("express");
-
 const emailController = require("../controllers/emailController");
 const authenticate = require("../middleware/authenticate");
 const requirePermission = require("../middleware/requirePermission");
@@ -11,6 +10,13 @@ router.post(
   authenticate,
   requirePermission("email.send"),
   emailController.sendEmail,
+);
+
+router.post(
+  "/conversations/:conversationId/reply",
+  authenticate,
+  requirePermission("email.send"),
+  emailController.replyToConversation,
 );
 
 router.get(
