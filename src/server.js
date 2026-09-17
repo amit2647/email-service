@@ -2,7 +2,6 @@ require("dotenv").config();
 
 const app = require("./app");
 const { testDatabaseConnection } = require("./config/database");
-const { initializeDatabase } = require("./db/initialize");
 const { verifyAccountSMTP } = require("./config/smtp");
 const { verifyAccountIMAP } = require("./config/imap");
 const { getActiveEmailAccounts } = require("./services/emailAccountService");
@@ -46,7 +45,6 @@ async function verifyEmailAccounts() {
 async function startServer() {
   try {
     await testDatabaseConnection();
-    await initializeDatabase();
     await verifyEmailAccounts();
 
     app.listen(PORT, async () => {
