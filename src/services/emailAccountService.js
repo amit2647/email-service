@@ -8,23 +8,27 @@ function normalizeEmail(value) {
   return value.trim().toLowerCase();
 }
 
+// Input keys are snake_case, matching this service's own JSON responses and the
+// email_accounts columns. updateEmailAccount relies on that: it spreads the existing
+// row over the request body, so an omitted password keeps its stored value.
 function normalizeAccountInput(input) {
   return {
     name: input.name?.trim(),
-    emailAddress: normalizeEmail(input.emailAddress),
+    emailAddress: normalizeEmail(input.email_address),
     provider: input.provider?.trim().toLowerCase() || "gmail",
-    smtpHost: input.smtpHost?.trim() || null,
-    smtpPort: input.smtpPort ? Number(input.smtpPort) : null,
-    smtpSecure: Boolean(input.smtpSecure),
-    smtpUsername: normalizeEmail(input.smtpUsername),
-    smtpPassword: input.smtpPassword || null,
-    imapHost: input.imapHost?.trim() || null,
-    imapPort: input.imapPort ? Number(input.imapPort) : null,
+    smtpHost: input.smtp_host?.trim() || null,
+    smtpPort: input.smtp_port ? Number(input.smtp_port) : null,
+    smtpSecure: Boolean(input.smtp_secure),
+    smtpUsername: normalizeEmail(input.smtp_username),
+    smtpPassword: input.smtp_password || null,
+    imapHost: input.imap_host?.trim() || null,
+    imapPort: input.imap_port ? Number(input.imap_port) : null,
     imapSecure:
-      input.imapSecure === undefined ? true : Boolean(input.imapSecure),
-    imapUsername: normalizeEmail(input.imapUsername),
-    imapPassword: input.imapPassword || null,
-    imapMailbox: input.imapMailbox?.trim() || "INBOX",
+      input.imap_secure === undefined ? true : Boolean(input.imap_secure),
+    imapUsername: normalizeEmail(input.imap_username),
+    imapPassword: input.imap_password || null,
+    imapMailbox: input.imap_mailbox?.trim() || "INBOX",
+    isActive: input.is_active === undefined ? true : Boolean(input.is_active),
   };
 }
 
@@ -124,7 +128,8 @@ async function createEmailAccount(organizationId, input) {
         imap_secure,
         imap_username,
         imap_password,
-        imap_mailbox
+        imap_mailbox,
+        is_active
       )
       VALUES (
         $1,
@@ -141,7 +146,8 @@ async function createEmailAccount(organizationId, input) {
         $12,
         $13,
         $14,
-        $15
+        $15,
+        $16
       )
       RETURNING
         id,
@@ -178,6 +184,7 @@ async function createEmailAccount(organizationId, input) {
       account.imapUsername,
       account.imapPassword,
       account.imapMailbox,
+      account.isActive,
     ],
   );
 
@@ -293,9 +300,10 @@ async function updateEmailAccount(organizationId, emailAccountId, input) {
         imap_username = $12,
         imap_password = $13,
         imap_mailbox = $14,
+        is_active = $15,
         updated_at = NOW()
-      WHERE id = $15
-        AND organization_id = $16
+      WHERE id = $16
+        AND organization_id = $17
       RETURNING
         id,
         organization_id,
@@ -330,6 +338,7 @@ async function updateEmailAccount(organizationId, emailAccountId, input) {
       account.imapUsername,
       account.imapPassword,
       account.imapMailbox,
+      account.isActive,
       emailAccountId,
       organizationId,
     ],
