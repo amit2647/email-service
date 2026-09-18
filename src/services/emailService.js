@@ -1125,8 +1125,17 @@ async function getCommunications({
         ON ec.id = c.conversation_id
       LEFT JOIN email_accounts ea
         ON ea.id = ec.email_account_id
-      LEFT JOIN email_deliveries ed
-        ON ed.communication_id = c.id
+      -- Lateral, not a plain join: a communication with more than one delivery
+      -- row would otherwise appear once per delivery and duplicate the message
+      -- in the thread. getCommunicationById avoids this with LIMIT 1, which is
+      -- not available here because this query returns many communications.
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM email_deliveries d
+        WHERE d.communication_id = c.id
+        ORDER BY d.id ASC
+        LIMIT 1
+      ) ed ON TRUE
       WHERE ${conditions.join(" AND ")}
       ORDER BY c.created_at DESC
       LIMIT $${limitParameter}
