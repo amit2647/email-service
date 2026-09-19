@@ -34,7 +34,7 @@ async function createReceiverState(
         last_processed_uid
       )
       VALUES ($1, $2, $3)
-      ON CONFLICT (email_account_id, mailbox)
+      ON CONFLICT (email_account_id, mailbox) WHERE email_account_id IS NOT NULL
       DO UPDATE SET
         last_processed_uid =
           email_receiver_state.last_processed_uid,
