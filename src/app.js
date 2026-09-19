@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const emailRoutes = require("./routes/emailRoutes");
 const emailAccountRoutes = require("./routes/emailAccountRoutes");
+const emailTemplateRoutes = require("./routes/emailTemplateRoutes");
+const emailAutomationRoutes = require("./routes/emailAutomationRoutes");
 const requestLogger = require("./middleware/requestLogger");
 
 const app = express();
@@ -26,6 +28,8 @@ app.get("/health", (req, res) => {
 
 app.use("/emails", emailRoutes);
 app.use("/emails/accounts", emailAccountRoutes);
+app.use("/emails/templates", emailTemplateRoutes);
+app.use("/emails/automations", emailAutomationRoutes);
 
 app.use((req, res) => {
   res.status(404).json({

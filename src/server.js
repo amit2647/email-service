@@ -6,6 +6,7 @@ const { verifyAccountSMTP } = require("./config/smtp");
 const { verifyAccountIMAP } = require("./config/imap");
 const { getActiveEmailAccounts } = require("./services/emailAccountService");
 const { startEmailReceiver } = require("./workers/emailReceiver");
+const { startAutomationRunner } = require("./workers/automationRunner");
 
 const PORT = Number(process.env.PORT || 4006);
 
@@ -46,6 +47,8 @@ async function startServer() {
   try {
     await testDatabaseConnection();
     await verifyEmailAccounts();
+
+    startAutomationRunner();
 
     app.listen(PORT, async () => {
       console.log(`Email Service running on port ${PORT}`);

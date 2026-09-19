@@ -238,6 +238,39 @@ async function validateContact({
   };
 }
 
+/*
+ * Ownership check for internally queued work (automations), which runs in a
+ * background worker with no user token.
+ *
+ * The record was created by the producing service, which already owns it, so
+ * this confirms tenancy straight from the shared database instead of calling
+ * back over HTTP with a token the worker does not have. The check itself is not
+ * skipped — only the transport changes.
+ */
+async function validateContactLocally({ organizationId, leadId, customerId }) {
+  const id = leadId || customerId;
+
+  if (!id) {
+    return;
+  }
+
+  // Fixed identifiers, not interpolated user input.
+  const table = leadId ? "leads" : "customers";
+  const label = leadId ? "Lead" : "Customer";
+
+  const result = await query(
+    `SELECT id FROM ${table} WHERE id = $1 AND organization_id = $2`,
+    [id, organizationId],
+  );
+
+  if (result.rows.length === 0) {
+    throw createServiceError(
+      `${label} ${id} does not belong to the authenticated organization`,
+      404,
+    );
+  }
+}
+
 async function getEmailAccountById({ organizationId, emailAccountId }) {
   const normalizedEmailAccountId = normalizeId(
     emailAccountId,
@@ -795,6 +828,8 @@ async function sendEmail({
   text,
   replyTo,
   authorizationToken,
+  // Set only by the automation runner; client requests always validate remotely.
+  trusted = false,
 }) {
   if (!organizationId) {
     throw createServiceError("Organization context is required", 400);
@@ -818,12 +853,20 @@ async function sendEmail({
     text,
   });
 
-  await validateContact({
-    organizationId,
-    leadId: normalizedLeadId,
-    customerId: normalizedCustomerId,
-    authorizationToken,
-  });
+  if (trusted) {
+    await validateContactLocally({
+      organizationId,
+      leadId: normalizedLeadId,
+      customerId: normalizedCustomerId,
+    });
+  } else {
+    await validateContact({
+      organizationId,
+      leadId: normalizedLeadId,
+      customerId: normalizedCustomerId,
+      authorizationToken,
+    });
+  }
 
   const emailAccount = await resolveEmailAccount({
     organizationId,
