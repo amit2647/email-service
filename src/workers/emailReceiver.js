@@ -347,38 +347,79 @@ async function startAccountReceiver(emailAccount) {
   return client;
 }
 
-async function startEmailReceiver() {
-  const emailAccounts = await getActiveEmailAccounts();
+/*
+ * Keeps one receiver per active account, and keeps them alive.
+ *
+ * Receivers used to be started once, at boot, from the accounts that existed
+ * then. An account added later never received replies until a restart, and a
+ * dropped IMAP connection (network blip, server timeout) was logged and never
+ * reopened, so replies silently stopped. This reconciles on an interval
+ * instead: new or disconnected accounts are (re)started, deactivated ones
+ * stopped.
+ */
+const RECEIVER_SYNC_MS = Number(process.env.EMAIL_RECEIVER_SYNC_MS || 60000);
 
-  if (!emailAccounts || emailAccounts.length === 0) {
-    console.log("[IMAP] No active email accounts configured");
-    return [];
+const receivers = new Map();
+const failing = new Set();
+let syncing = false;
+
+async function syncReceivers() {
+  if (syncing) {
+    return;
   }
 
-  console.log(
-    `[IMAP] Starting ${emailAccounts.length} active email account(s)`,
-  );
+  syncing = true;
 
-  const receivers = [];
+  try {
+    const emailAccounts = (await getActiveEmailAccounts()) || [];
+    const activeIds = new Set(emailAccounts.map((account) => account.id));
 
-  for (const emailAccount of emailAccounts) {
-    try {
-      const receiver = await startAccountReceiver(emailAccount);
-
-      receivers.push(receiver);
-
-      console.log(
-        `[IMAP] Email account ${emailAccount.id} started successfully`,
-      );
-    } catch (error) {
-      console.error(
-        `[IMAP] Failed to start email account ${emailAccount.id}:`,
-        error,
-      );
+    for (const [accountId, client] of receivers) {
+      if (!activeIds.has(accountId)) {
+        receivers.delete(accountId);
+        console.log(`[IMAP][Account ${accountId}] Stopping: account no longer active`);
+        client.logout().catch(() => client.close());
+      }
     }
-  }
 
-  return receivers;
+    for (const emailAccount of emailAccounts) {
+      const current = receivers.get(emailAccount.id);
+
+      // imapflow clears `usable` when the connection closes.
+      if (current && current.usable) {
+        continue;
+      }
+
+      receivers.delete(emailAccount.id);
+
+      try {
+        receivers.set(emailAccount.id, await startAccountReceiver(emailAccount));
+        failing.delete(emailAccount.id);
+
+        console.log(`[IMAP] Email account ${emailAccount.id} started successfully`);
+      } catch (error) {
+        // Logged once per outage, then retried quietly every sync.
+        if (!failing.has(emailAccount.id)) {
+          failing.add(emailAccount.id);
+          console.error(`[IMAP] Failed to start email account ${emailAccount.id}:`, error.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[IMAP] Receiver sync failed:", error.message);
+  } finally {
+    syncing = false;
+  }
+}
+
+async function startEmailReceiver() {
+  await syncReceivers();
+
+  setInterval(syncReceivers, RECEIVER_SYNC_MS).unref();
+
+  console.log(`[IMAP] Receiver sync every ${RECEIVER_SYNC_MS}ms`);
+
+  return [...receivers.values()];
 }
 
 module.exports = {
