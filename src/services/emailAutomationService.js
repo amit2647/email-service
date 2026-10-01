@@ -67,9 +67,12 @@ async function listAutomations(organizationId) {
     `SELECT a.id, a.organization_id, a.name, a.description, a.trigger_event,
             a.template_id, a.email_account_id, a.is_active,
             a.created_at, a.updated_at,
-            t.name AS template_name
+            t.name AS template_name,
+            ea.name AS email_account_name,
+            ea.email_address AS email_account_address
      FROM email_automations a
      LEFT JOIN email_templates t ON t.id = a.template_id
+     LEFT JOIN email_accounts ea ON ea.id = a.email_account_id
      WHERE a.organization_id = $1
      ORDER BY a.trigger_event ASC, a.name ASC`,
     [organizationId],
@@ -104,6 +107,63 @@ async function assertTemplateInOrganization(organizationId, templateId) {
   }
 }
 
+/*
+ * The accounts an automation can send from: the organization's active ones,
+ * name and address only. Returned with the automation list so the people who
+ * edit automations can choose one without also needing system.integrations.
+ */
+async function listSendingAccounts(organizationId) {
+  const result = await query(
+    `SELECT id, name, email_address
+       FROM email_accounts
+      WHERE organization_id = $1 AND is_active = true
+      ORDER BY name ASC, id ASC`,
+    [organizationId],
+  );
+
+  return result.rows;
+}
+
+function badRequest(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+}
+
+/*
+ * An automation must be able to resolve an account to send from.
+ *
+ * A chosen account must belong to this organization and be active; the id
+ * arrives from the client. With no account chosen it falls back to the
+ * organization's default, which only exists while exactly one account is
+ * active — with two, every such automation failed at send time with nothing
+ * in the UI to say why. Checked when an automation is saved switched on, or
+ * switched on later; a switched-off draft may be saved without one.
+ */
+async function assertSendingAccount(organizationId, emailAccountId, isActive) {
+  const accounts = await listSendingAccounts(organizationId);
+
+  if (emailAccountId) {
+    if (!accounts.some((account) => account.id === emailAccountId)) {
+      throw badRequest("Choose an active email account from this organization to send from");
+    }
+
+    return;
+  }
+
+  if (!isActive) {
+    return;
+  }
+
+  if (accounts.length === 0) {
+    throw badRequest("Connect an email account before switching this automation on");
+  }
+
+  if (accounts.length > 1) {
+    throw badRequest("More than one email account is connected — choose which one this automation sends from");
+  }
+}
+
 async function createAutomation(organizationId, input) {
   const automation = normalizeAutomationInput(input);
   const errors = validateAutomationInput(automation);
@@ -116,6 +176,7 @@ async function createAutomation(organizationId, input) {
   }
 
   await assertTemplateInOrganization(organizationId, automation.templateId);
+  await assertSendingAccount(organizationId, automation.emailAccountId, automation.isActive);
 
   const result = await query(
     `INSERT INTO email_automations
@@ -157,6 +218,7 @@ async function updateAutomation(organizationId, automationId, input) {
   }
 
   await assertTemplateInOrganization(organizationId, automation.templateId);
+  await assertSendingAccount(organizationId, automation.emailAccountId, automation.isActive);
 
   const result = await query(
     `UPDATE email_automations
@@ -180,6 +242,14 @@ async function updateAutomation(organizationId, automationId, input) {
 }
 
 async function setAutomationStatus(organizationId, automationId, isActive) {
+  if (isActive) {
+    const existing = await getAutomationById(organizationId, automationId);
+
+    if (existing) {
+      await assertSendingAccount(organizationId, existing.email_account_id, true);
+    }
+  }
+
   const result = await query(
     `UPDATE email_automations
      SET is_active = $1, updated_at = NOW()
@@ -327,6 +397,7 @@ module.exports = {
   TRIGGER_EVENTS,
   MAX_ATTEMPTS,
   listAutomations,
+  listSendingAccounts,
   getAutomationById,
   createAutomation,
   updateAutomation,

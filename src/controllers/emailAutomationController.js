@@ -39,12 +39,14 @@ function handleError(res, error) {
 
 async function getAutomations(req, res) {
   try {
-    const automations = await emailAutomationService.listAutomations(getOrganizationId(req));
+    const organizationId = getOrganizationId(req);
+    const automations = await emailAutomationService.listAutomations(organizationId);
 
     return res.json({
       automations,
       count: automations.length,
       events: emailAutomationService.TRIGGER_EVENTS,
+      accounts: await emailAutomationService.listSendingAccounts(organizationId),
     });
   } catch (error) {
     return handleError(res, error);
