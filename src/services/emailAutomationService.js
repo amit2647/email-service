@@ -2,6 +2,10 @@ const { query } = require("../config/database");
 
 const TRIGGER_EVENTS = ["lead.created", "lead.converted", "customer.created"];
 
+// Raised by the profession-bundle capability services. Only an organization
+// with a bundle installed has anything that emits them.
+const CAPABILITY_EVENTS = ["engagement.created", "obligation.due_soon", "obligation.overdue"];
+
 const MAX_ATTEMPTS = 5;
 
 const AUTOMATION_COLUMNS = `
@@ -51,7 +55,7 @@ function validateAutomationInput(input) {
 
   if (!input.triggerEvent) {
     errors.push("trigger_event is required");
-  } else if (!TRIGGER_EVENTS.includes(input.triggerEvent)) {
+  } else if (![...TRIGGER_EVENTS, ...CAPABILITY_EVENTS].includes(input.triggerEvent)) {
     errors.push(`trigger_event must be one of: ${TRIGGER_EVENTS.join(", ")}`);
   }
 
@@ -164,6 +168,21 @@ async function assertSendingAccount(organizationId, emailAccountId, isActive) {
   }
 }
 
+async function assertTriggerAvailable(organizationId, triggerEvent) {
+  if (!CAPABILITY_EVENTS.includes(triggerEvent)) {
+    return;
+  }
+
+  const installed = await query(
+    "SELECT 1 FROM organization_bundles WHERE organization_id = $1 LIMIT 1",
+    [organizationId],
+  );
+
+  if (installed.rows.length === 0) {
+    throw badRequest(`trigger_event must be one of: ${TRIGGER_EVENTS.join(", ")}`);
+  }
+}
+
 async function createAutomation(organizationId, input) {
   const automation = normalizeAutomationInput(input);
   const errors = validateAutomationInput(automation);
@@ -176,6 +195,7 @@ async function createAutomation(organizationId, input) {
   }
 
   await assertTemplateInOrganization(organizationId, automation.templateId);
+  await assertTriggerAvailable(organizationId, automation.triggerEvent);
   await assertSendingAccount(organizationId, automation.emailAccountId, automation.isActive);
 
   const result = await query(
@@ -218,6 +238,7 @@ async function updateAutomation(organizationId, automationId, input) {
   }
 
   await assertTemplateInOrganization(organizationId, automation.templateId);
+  await assertTriggerAvailable(organizationId, automation.triggerEvent);
   await assertSendingAccount(organizationId, automation.emailAccountId, automation.isActive);
 
   const result = await query(
