@@ -312,10 +312,12 @@ async function deleteAutomation(organizationId, automationId) {
 async function enqueueEvent(organizationId, input) {
   const event = input.event?.trim();
 
-  if (!TRIGGER_EVENTS.includes(event)) {
+  // Capability events come from the bundle services, which only raise them
+  // for an organization with a bundle.
+  if (![...TRIGGER_EVENTS, ...CAPABILITY_EVENTS].includes(event)) {
     const error = new Error("Unknown automation event");
     error.statusCode = 400;
-    error.details = [`event must be one of: ${TRIGGER_EVENTS.join(", ")}`];
+    error.details = [`event must be one of: ${[...TRIGGER_EVENTS, ...CAPABILITY_EVENTS].join(", ")}`];
     throw error;
   }
 
