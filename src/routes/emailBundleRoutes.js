@@ -3,6 +3,7 @@ const express = require("express");
 const authenticate = require("../middleware/authenticate");
 const requirePermission = require("../middleware/requirePermission");
 const { installEmail } = require("../services/bundleInstallService");
+const { choicesOf } = require("../services/bundleSync");
 
 const router = express.Router();
 
@@ -28,7 +29,7 @@ router.put("/:key/:version", authenticate, requirePermission("bundles.manage"), 
       return res.status(400).json({ error: "email must be a list of { key, name, trigger, subject, body }" });
     }
 
-    return res.json(await installEmail(req.auth.organizationId, req.auth.userId, key, version, items));
+    return res.json(await installEmail(req.auth.organizationId, req.auth.userId, key, version, items, choicesOf(req)));
   } catch (error) {
     console.error("[Bundle Install] email:", error.message);
 

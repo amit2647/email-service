@@ -102,6 +102,28 @@ describe("installEmail", () => {
     assert.equal(find(/^UPDATE email_templates SET name/).length, 0);
   });
 
+  test("an edited template is reported, and accepting it takes the bundle's wording without switching anything on", async () => {
+    const v1 = { name: ITEM.name, subject: ITEM.subject, body: "Old bundle words" };
+
+    rows.email_templates.push({ id: 40, key: ITEM.key, name: ITEM.name, subject: ITEM.subject, body: "Our own words", source_checksum: checksum(v1) });
+
+    const kept = await installEmail(3, 1, "ca-practice", "0.2.0", [ITEM]);
+    assert.deepEqual(kept.customized.map((item) => [item.kind, item.key, item.mine.body, item.theirs.body]), [["template", ITEM.key, "Our own words", ITEM.body]]);
+
+    statements = [];
+    await installEmail(3, 1, "ca-practice", "0.2.0", [ITEM], { accept: new Set([`template:${ITEM.key}`]) });
+    assert.deepEqual(find(/^UPDATE email_templates SET name/)[0].params, [ITEM.name, ITEM.subject, ITEM.body, 40]);
+    // The automation it sends is created off; nothing updates is_active.
+    assert.equal(find(/^UPDATE email_automations .*is_active/).filter((statement) => !/retired_at = NOW/.test(statement.sql)).length, 0);
+    assert.match(find(/^INSERT INTO email_automations/)[0].sql, /false/);
+
+    statements = [];
+    const dismissed = await installEmail(3, 1, "ca-practice", "0.2.0", [ITEM], { dismiss: new Set([`template:${ITEM.key}`]), dryRun: true });
+    assert.equal(dismissed.customized.length, 0);
+    assert.equal(find(/^UPDATE email_templates SET name/).length, 0);
+    assert.equal(find(/^ROLLBACK/).length, 1);
+  });
+
   test("a withdrawn reminder is retired and switched off", async () => {
     await installEmail(3, 1, "ca-practice", "0.2.0", []);
 
