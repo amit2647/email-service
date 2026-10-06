@@ -1,6 +1,7 @@
 const express = require("express");
 
 const authenticate = require("../middleware/authenticate");
+const authenticateUserOrService = require("../middleware/authenticateUserOrService");
 const requirePermission = require("../middleware/requirePermission");
 const controller = require("../controllers/emailAutomationController");
 
@@ -14,7 +15,8 @@ const router = express.Router();
  *
  * Declared before /:id so "trigger" is never read as an id.
  */
-router.post("/trigger", authenticate, controller.triggerEvent);
+// A person, or a background service with its narrow service token (deadline reminders).
+router.post("/trigger", authenticateUserOrService, controller.triggerEvent);
 
 router.get("/", authenticate, requirePermission("email.automations.read"), controller.getAutomations);
 

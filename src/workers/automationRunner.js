@@ -12,19 +12,23 @@ let running = false;
 /*
  * The payload carries the record itself, so rendering needs no callback to the
  * producing service. lead.* events put it under `lead`, customer.* under
- * `customer`; both are exposed so a template can use either name.
+ * `customer`; the profession-bundle events put the client under `client`,
+ * with `obligation` or `engagement` beside it. All are exposed by name.
  */
 function buildContext(payload) {
   return {
     lead: payload.lead || null,
     customer: payload.customer || null,
+    client: payload.client || null,
+    obligation: payload.obligation || null,
+    engagement: payload.engagement || null,
     organization: payload.organization || null,
-    contact: payload.lead || payload.customer || null,
+    contact: payload.lead || payload.customer || payload.client || null,
   };
 }
 
 function recipientOf(payload) {
-  return payload.lead?.email || payload.customer?.email || payload.to || null;
+  return payload.lead?.email || payload.customer?.email || payload.client?.email || payload.to || null;
 }
 
 /*
@@ -75,7 +79,7 @@ async function runAutomation(event, automation) {
     // Same rule as the composer: without this the conversation is never linked
     // to the record and any reply arrives orphaned.
     leadId: payload.lead?.id || null,
-    customerId: payload.customer?.id || null,
+    customerId: payload.customer?.id || payload.client?.id || null,
     emailAccountId: automation.email_account_id || null,
     to,
     subject: emailTemplateService.renderTemplate(template.subject, context),
